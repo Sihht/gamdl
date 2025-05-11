@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import re
 import time
 import typing
@@ -10,6 +11,7 @@ from pathlib import Path
 import requests
 
 from .utils import raise_response_exception
+from .custom_formatter import CustomFormatter
 
 
 class AppleMusicApi:
@@ -26,11 +28,22 @@ class AppleMusicApi:
         cookies_path: Path | None = Path("./cookies.txt"),
         storefront: None | str = None,
         language: str = "en-US",
+        log_level: str = "INFO",
     ):
         self.cookies_path = cookies_path
         self.storefront = storefront
         self.language = language
+        self._set_logger(log_level)
         self._set_session()
+
+    def _set_logger(self, log_level: str):
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(log_level)
+        if not self.logger.handlers:
+            stream_handler = logging.StreamHandler()
+            stream_handler.setFormatter(CustomFormatter())
+            self.logger.addHandler(stream_handler)
+            self.logger.propagate = False  # Optional: prevent double logging
 
     def _set_session(self):
         self.session = requests.Session()
@@ -38,13 +51,8 @@ class AppleMusicApi:
             cookies = MozillaCookieJar(self.cookies_path)
             cookies.load(ignore_discard=True, ignore_expires=True)
             self.session.cookies.update(cookies)
-            media_user_token = self.session.cookies.get_dict().get("media-user-token")
-            if not media_user_token:
-                raise ValueError(
-                    "media-user-token not found in cookies. "
-                    "Make sure you're logged in to Apple Music, have an active subscription, and "
-                    "exported the cookies from the Apple Music homepage."
-                )
+            self.storefront = self.session.cookies.get_dict()["itua"]
+            media_user_token = self.session.cookies.get_dict()["media-user-token"]
         else:
             media_user_token = ""
         self.session.headers.update(
@@ -75,7 +83,6 @@ class AppleMusicApi:
         token = re.search('(?=eyJh)(.*?)(?=")', index_js_page).group(1)
         self.session.headers.update({"authorization": f"Bearer {token}"})
         self.session.params = {"l": self.language}
-        self._set_storefront()
 
     def _check_amp_api_response(self, response: requests.Response):
         try:
@@ -88,22 +95,6 @@ class AppleMusicApi:
             AssertionError,
         ):
             raise_response_exception(response)
-
-    def _set_storefront(self):
-        if self.cookies_path:
-            self.storefront = (
-                self.session.cookies.get_dict().get("itua")
-                or self.get_user_storefront()["id"]
-            )
-        else:
-            self.storefront = self.storefront or "us"
-
-    def get_user_storefront(
-        self,
-    ) -> dict:
-        response = self.session.get(f"{self.AMP_API_URL}/v1/me/storefront")
-        self._check_amp_api_response(response)
-        return response.json()["data"][0]
 
     def get_artist(
         self,
@@ -153,17 +144,12 @@ class AppleMusicApi:
     ) -> dict:
         response = self.session.get(
             f"{self.AMP_API_URL}/v1/catalog/{self.storefront}/music-videos/{music_video_id}",
-            params={
-                "include": include,
-            },
+            params={"include": include},
         )
         self._check_amp_api_response(response)
         return response.json()["data"][0]
 
-    def get_post(
-        self,
-        post_id: str,
-    ) -> dict:
+    def get_post(self, post_id: str) -> dict:
         response = self.session.get(
             f"{self.AMP_API_URL}/v1/catalog/{self.storefront}/uploaded-videos/{post_id}"
         )
@@ -171,16 +157,10 @@ class AppleMusicApi:
         return response.json()["data"][0]
 
     @functools.lru_cache()
-    def get_album(
-        self,
-        album_id: str,
-        extend: str = "extendedAssetUrls",
-    ) -> dict:
+    def get_album(self, album_id: str, extend: str = "extendedAssetUrls") -> dict:
         response = self.session.get(
             f"{self.AMP_API_URL}/v1/catalog/{self.storefront}/albums/{album_id}",
-            params={
-                "extend": extend,
-            },
+            params={"extend": extend},
         )
         self._check_amp_api_response(response)
         return response.json()["data"][0]
@@ -216,7 +196,6 @@ class AppleMusicApi:
         limit: int = 25,
         offset: int = 0,
     ) -> dict:
-
         response = self.session.get(
             f"{self.AMP_API_URL}/v1/catalog/{self.storefront}/search",
             params={
@@ -244,17 +223,12 @@ class AppleMusicApi:
     def _get_next_uri_response(self, next_uri: str, limit: int) -> dict:
         response = self.session.get(
             self.AMP_API_URL + next_uri,
-            params={
-                "limit": limit,
-            },
+            params={"limit": limit},
         )
         self._check_amp_api_response(response)
         return response.json()
 
-    def get_webplayback(
-        self,
-        track_id: str,
-    ) -> dict:
+    def get_webplayback(self, track_id: str) -> dict:
         response = self.session.post(
             self.WEBPLAYBACK_API_URL,
             json={
@@ -292,6 +266,7 @@ class AppleMusicApi:
                 "user-initiated": True,
             },
         )
+        self.logger.info(f"Fetching next URI: {track_id}")
         try:
             response.raise_for_status()
             response_dict = response.json()
